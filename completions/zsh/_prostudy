@@ -1,0 +1,10 @@
+#compdef prostudy
+
+_arguments -C -S \
+  {-h,--help}'[Client certificate file and password]': \
+  {-s,--status-notify}'[Write time left as a notificication]': \
+  {-t,--timer}'[Start a non blocking timer]': \
+  --test-domains'[Test each domain in file and output working domains]':'file':_files \
+  --fetch-domain-ips'[Output ip for domains in file]':'file':_files \
+  --debug'[See debugging information for your system]': \
+  --delete-pid-lock'[Delete PID file]':

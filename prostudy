@@ -1,0 +1,539 @@
+#!/usr/bin/env bash
+
+# Global variables because FTW
+duration=0
+duration_as_sec=0
+time_to_stop=0
+
+CONFIGDIR=".prostudy"
+USERWNAME=$(w --no-header --short | head -n 1 | awk '{ print $1 }')
+USERCONFIG="/home/$USERWNAME/$CONFIGDIR"
+
+# Some settings
+PROGRAM_NAME="Pro Study"
+VERSION="1.0"
+TMPFILE="prostutime"
+
+# Some locations
+DOMAINFILE="$USERCONFIG/block.txt"
+IPFILE="$USERCONFIG/ipblock.txt"
+PBLOCKFILE="$USERCONFIG/pblock.txt"
+EVILFILE="$USERCONFIG/evilblock.txt"
+
+# Usage flags
+EVILMODE=false
+FIREWALL=false
+HOSTS=false
+PBLOCKS=false
+INTBLOCK=false
+
+PBLOCKSARR=('sudo')
+
+main()
+{
+
+    if ! [ -e $DOMAINFILE ]; then generate_example_configs; fi
+
+    if [[ "$1" == "-h" || "$1" == "--help" ]]; then print_help; exit 0; fi
+    if [[ "$1" == "-s" || "$1" == "--status-notify" ]]; then status_notify; exit 0; fi
+
+    if [[ "$1" == "-t" || "$1" == "--timer" ]]; then
+        if [[ "$3" =~ ^[0-9]+$ ]]; then rootcheck; fi
+        set_time_to_stop $2
+        passive_timer $3 &
+        disown
+        exit 0
+    fi
+
+    if [[ "$1" == "--test-domains" ]]; then domainfile_test_n_sort $2; exit 0; fi
+    if [[ "$1" == "--fetch-domain-ips" ]]; then domain_fetch_ips $2; exit 0; fi
+    if [[ "$1" == "--debug" ]]; then print_debug_info; exit 0; fi
+
+    if [[ "$1" == "--delete-pid-lock" ]]; then sudo rm -f /tmp/prostudyPID; rm -f /tmp/prostudyPTPID; echo "Lock (maybe) deleted."; exit 0; fi
+
+    test_start
+
+    if [ $# -eq 0 ]; then
+        interactive_start;
+    elif [[ "$1" == "-started" ]]; then
+        interactive_start $1;
+    elif [[ "$1" =~ ^[0-9]+$ ]]; then
+        cli_start $1
+    else
+        print_help;
+        exit 0
+    fi
+}
+
+# Start it all
+interactive_start()
+{
+    HOSTS=false
+    FIREWALL=false
+    DEFAULT_BLOCK_TIME="45"
+
+    if [ -e /tmp/"$TMPFILE" ]; then
+        DEFAULT_BLOCK_TIME=$(</tmp/"$TMPFILE")
+    fi
+
+
+    if [[ "$1" != "-started" ]]; then
+        whiptail --title "$PROGRAM_NAME" --msgbox "Welcome to $PROGRAM_NAME. This software is made to help you study, it will block distractions and other things on your linux machine." 8 78
+    fi
+
+    rootprompt
+
+    while true; do
+        duration=$(whiptail --inputbox "For how long do you want to block? In minutes with no decimals" 8 78 $DEFAULT_BLOCK_TIME --title "$PROGRAM_NAME" 3>&1 1>&2 2>&3)
+        if [ $? == 1 ]; then exit 0; fi
+        if [[ $duration =~ ^[0-9]+$ ]] ; then break; fi
+    done
+
+    if (whiptail --title "$PROGRAM_NAME" --yesno "Do you want to block the internet entirely?" --defaultno 8 78) then
+        INTBLOCK=true
+    else
+        if (whiptail --title "$PROGRAM_NAME" --yesno "Do you want to restrict internet access using hosts?" 8 78) then
+            HOSTS=true
+        fi
+        if (whiptail --title "$PROGRAM_NAME" --yesno "Do you want to restrict internet access using iptables?" 8 78) then
+            FIREWALL=true
+            if (whiptail --title "$PROGRAM_NAME" --yesno "Do you want to enable evil mode? Makes firewall rules for all domains. As opposed to only hostfile blocking." --defaultno 8 78) then
+                EVILMODE=true
+            fi
+        fi
+    fi
+    if (whiptail --title "$PROGRAM_NAME" --yesno "Do you want to block processes? Sudo is always blocked" 8 78) then PBLOCKS=true; fi
+    if !(whiptail --title "$PROGRAM_NAME" --yesno "You are now ready to start! Do you promise to study?" --yes-button "I promise" 8 78) then exit 0; fi
+
+    set_time_to_stop $duration
+    echo "$duration" > /tmp/"$TMPFILE"
+
+    dull_internet
+    active_kill &
+    disown
+
+    if hash figlet 2> /dev/null; then clear; echo "$PROGRAM_NAME activated!" | figlet; fi
+}
+
+cli_start()
+{
+    HOSTS=true
+    FIREWALL=true
+    PBLOCKS=true
+    EVILMODE=false
+    INTBLOCK=false
+
+    set_time_to_stop $1
+
+    rootcheck
+
+    echo "$duration" > /tmp/"$TMPFILE"
+
+    dull_internet
+    active_kill &
+    disown
+
+    if hash figlet 2> /dev/null; then clear; echo "$PROGRAM_NAME activated!" | figlet; fi
+}
+
+# Build stuff
+build_evil()
+{
+    cat /dev/null > $EVILFILE
+    while read p; do
+        [[ -z "$p" ]] && continue
+        [[ "$p" =~ ^#.*$ ]] && continue
+
+        host "$p" | grep -o -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' >> $EVILFILE
+    done < $DOMAINFILE
+
+    while read p; do
+        [[ -z "$p" ]] && continue
+        [[ "$p" =~ ^#.*$ ]] && continue
+
+        echo "$p" >> $EVILFILE
+    done < $IPFILE
+
+    sort -u $EVILFILE > .tmpevil
+    cat /dev/null > $EVILFILE
+    cat .tmpevil > $EVILFILE
+    rm .tmpevil
+}
+
+build_pblock()
+{
+    while read p; do
+        [[ -z "$p" ]] && continue
+        [[ "$p" =~ ^#.*$ ]] && continue
+
+        PBLOCKSARR+=("$p")
+    done < $PBLOCKFILE
+    printf '%s\n' "${PBLOCKSARR[@]}"
+}
+
+# Ensure root
+rootcheck()
+{
+    if [ $(id -u) != "0" ]
+    then
+        exec sudo "$0" "$duration" "-started"
+        exit $?
+    fi
+}
+rootprompt()
+{
+    if [ "$(id -nu)" != "root" ]; then
+        sudo -k
+        pass=$(whiptail --title "$PROGRAM_NAME" --passwordbox "To use $PROGRAM_NAME you will have to be root, please enter your password" 12 50 3>&2 2>&1 1>&3-)
+        if [ $? == 1 ]; then exit 0; fi
+        exec sudo -S -p '' "$0" "-started" <<< "$pass"
+        exit 1
+    fi
+}
+
+# Change configurations of hosts and iptables
+dull_internet()
+{
+    if [[ "$INTBLOCK" == "true" ]]; then
+        block_internet_entirely
+        EVILMODE=false
+        HOSTS=false
+        FIREWALL=false
+    fi
+
+    if [[ "$EVILMODE" == "true" ]];then
+        build_evil
+        IPFILE=$EVILFILE
+    fi
+
+    if [[ "$HOSTS" == "true" ]];then
+        cp /etc/hosts /etc/hosts_backup
+
+        while read p; do
+            [[ -z "$p" ]] && continue
+            [[ "$p" =~ ^#.*$ ]] && continue
+
+            echo 127.0.0.1 "$p" >> /etc/hosts
+            echo 127.0.0.1 www."$p" >> /etc/hosts
+        done < $DOMAINFILE
+    fi
+
+    if [[ "$FIREWALL" = "true" ]];then
+        while read p; do
+            [[ -z "$p" ]] && continue
+            [[ "$p" =~ ^#.*$ ]] && continue
+
+            iptables -A INPUT -s "$p" -j DROP
+        done < $IPFILE
+    fi
+}
+
+happy_internet()
+{
+    if [[ "$INTBLOCK" == "true" ]]; then
+        unblock_internet
+    fi
+
+    if [[ "$HOSTS" == "true" ]];then
+        rm /etc/hosts
+        mv /etc/hosts_backup /etc/hosts
+    fi
+
+    if [[ "$FIREWALL" == "true" ]];then
+        while read p; do
+            [[ -z "$p" ]] && continue
+            [[ "$p" =~ ^#.*$ ]] && continue
+
+            iptables -D INPUT -s "$p" -j DROP
+        done < $IPFILE
+    fi
+}
+
+block_internet_entirely()
+{
+    iptables --policy INPUT DROP
+    iptables --policy OUTPUT DROP
+}
+
+unblock_internet()
+{
+    iptables --policy INPUT ACCEPT
+    iptables --policy OUTPUT ACCEPT
+}
+
+post_exec()
+{
+    if [[ "$PBLOCKS" == "true" ]]; then
+        if [ -e "$USERCONFIG/post.sh" ]; then
+            sudo -H -u "$USERWNAME" bash -c "$USERCONFIG/post.sh" &
+            disown
+        fi
+    fi
+}
+
+# Run and keep running until it is allowed to stop
+active_kill()
+{
+    if [[ "$PBLOCKS" == "true" ]]; then build_pblock; fi
+    rm /var/run/sudo/ts/$(who | awk '{ print $1 }' | head -1) &> /dev/null
+
+    say_hello "$duration"
+    while :; do
+        if [ "$time_to_stop" -ge "$SECONDS" ]; then
+            echo "$BASHPID" > /tmp/prostudyPID
+            killfun
+            sleep 0.1
+        else
+            happy_internet
+            rm $EVILFILE &> /dev/null
+            post_exec
+            rm /tmp/prostudyPID
+            say_goodbye
+            break
+        fi
+    done &
+}
+
+set_time_to_stop()
+{
+    start_seconds=$SECONDS
+    duration=$1
+    duration_as_sec=$[ $duration * 60 ]
+    time_to_stop=$[ $start_seconds + $duration_as_sec ]
+}
+
+passive_timer()
+{
+    timer_hello "$duration"
+
+    echo "$duration" > /tmp/prostutimePT
+
+    while :; do
+        sleep 0.1
+        echo "$BASHPID" > /tmp/prostudyPTPID
+        if ! [ "$time_to_stop" -ge "$SECONDS" ]; then
+            rm /tmp/prostudyPTPID
+            rm /tmp/prostutimePT
+
+            timer_goodbye
+
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                notify "Breaks over 1.5 minutes until blocking is activated!"
+                sleep 90
+                cli_start $1
+            fi
+
+            break
+        fi
+    done &
+}
+
+killfun()
+{
+    if [[ "$PBLOCKS" == "true" ]];then
+        for k in ${PBLOCKSARR[@]}; do
+            kill -9 $(pgrep -f $k) &> /dev/null
+        done
+    else
+        kill -9 $(pgrep -f sudo) &> /dev/null
+    fi
+}
+
+#region debug
+print_debug_info()
+{
+    if [ $(id -u) != "0" ]; then
+        exec sudo "$0" "--debug"
+        exit $?
+    fi
+
+    echo "Hostfile:"
+    echo ""
+    cat /etc/hosts
+    echo ""
+    echo "Backup hostfile:"
+    echo ""
+    cat /etc/hosts_backup
+    echo ""
+    echo "iptables:"
+    echo ""
+    sudo iptables -S
+    echo ""
+    echo "Check for running processes:"
+    ps aux | grep prostudy
+}
+
+# Assorted crap
+print_help()
+{
+    echo "strange"
+    B=$(basename $0)
+    USERCONFIGPRE="/"
+    USERCONFIG+=$USERCONFIGPRE
+    DOMAINFILE=${DOMAINFILE//$USERCONFIG}
+    IPFILE=${IPFILE//$USERCONFIG}
+    PBLOCKFILE=${PBLOCKFILE//$USERCONFIG}
+
+    echo "$PROGRAM_NAME, version $VERSION"
+    echo "Usage: $B [OPTION]"
+    echo "Block distractions while you study."
+    echo ""
+    echo "Quick cli start:"
+    echo -e "   $B 45"
+    echo -e "   For 45 minutes block"
+    echo "GUI start:"
+    echo -e "   $B"
+    echo ""
+    echo "Options:"
+    {
+        echo -e "   $B NUMBER\tQuick cli start with NUMBER minutes"
+        echo -e "   $B -h, --help\tDisplay help (this text)"
+        echo -e "   $B -s, --status-notify\tWrite time left as a notification"
+        echo -e "   $B -t, --timer NUMBER\tStart a non blocking timer for NUMBER minutes"
+        echo -e "   $B -t, --timer NUMBER NUMBER\tStart a non blocking timer followed by a blocking session"
+        echo -e "   $B --test-domains FILE\tTest each domain in file and output working domains"
+        echo -e "   $B --fetch-domain-ips FILE\tOutput ip's for domains in file"
+        echo -e "   $B --debug\tSee debugging information for your system"
+        echo -e "   $B --delete-pid-lock\tDelete PID file, you should never need this option"
+    } | column -t -s $'\t'
+    echo ""
+    echo "Config files:"
+    {
+        echo -e "   $DOMAINFILE\tdomains to block while studying. All domains will be added with and without www."
+        echo -e "   $IPFILE\tip addresses to block, could be something local."
+        echo -e "   $PBLOCKFILE\tprocesses to block, like a terminal."
+    } | column -t -s $'\t'
+    echo ""
+    echo "Each config file can hold one item per line, blank lines are ignored"
+    echo "and lines starting with a # are ignored."
+    echo "The config files should be located in ~/$CONFIGDIR/"
+
+}
+
+generate_example_configs()
+{
+    mkdir -p "$USERCONFIG" &> /dev/null
+    if [ ! -e "$DOMAINFILE" ]; then cp /usr/share/prostudy/block.txt $DOMAINFILE; fi
+    if [ ! -e "$IPFILE" ]; then cp /usr/share/prostudy/ipblock.txt $IPFILE; fi
+    if [ ! -e "$PBLOCKFILE" ]; then cp /usr/share/prostudy/pblock.txt $PBLOCKFILE; fi
+
+    if [[ $EUID -eq 0 ]]; then
+        chown "$USERWNAME":"$USERWNAME" -R "$USERCONFIG"
+    fi
+}
+
+test_requirements()
+{
+    echo -e "The following requirements have been checked:\n"
+    {
+        echo -e "PROGRAM:\tSTATUS:"
+        if hash figlet 2> /dev/null; then echo -e "figlet\tinstalled"; else echo -e "figlet\tmissing (recommended)"; fi
+        if hash whiptail 2> /dev/null; then echo -e "whiptail\tinstalled"; else echo -e "whiptail\tmissing (needed for GUI)"; fi
+        if hash iptables 2> /dev/null; then echo -e "iptables\tinstalled"; else echo -e "iptables\tmissing (needed for firewall)"; fi
+        if hash sudo 2> /dev/null; then echo -e "sudo\tinstalled"; else echo -e "sudo\tmissing (needed)"; fi
+        if [ -e /usr/bin/notify-send ]; then echo -e "notify-send\tinstalled"; else echo -e "notify-send\tmissing (recommended)"; fi
+    } | column -t -s $'\t'
+}
+
+test_start()
+{
+    if [ -e "/tmp/prostudyPID" ]; then echo "We are probably already running!"; exit 1; fi
+
+    if ! hash figlet 2> /dev/null; then echo "figlet error"; exit 1; fi
+    if ! hash whiptail 2> /dev/null; then echo "whiptail error"; exit 1; fi
+    if ! hash iptables 2> /dev/null; then echo "iptables error"; exit 1; fi
+    if ! hash sudo 2> /dev/null; then echo "sudo error"; exit 1; fi
+    if ! [ -e /usr/bin/notify-send ]; then echo "notify-send error"; exit 1; fi
+
+    if [ ! -e "$DOMAINFILE" ]; then echo "domainfile error"; exit 1; fi
+    if [ ! -e "$IPFILE" ]; then echo "ipfile error"; exit 1; fi
+    if [ ! -e "$PBLOCKFILE" ]; then echo "pblockfile error"; exit 1; fi
+}
+
+say_goodbye()
+{
+    notify "Study time is up :)"
+}
+
+say_hello()
+{
+    notify "You are now blocked the next $1 minutes.\nStudy well."
+}
+
+timer_hello()
+{
+    notify "Timer sat for the next $1 minutes."
+}
+
+timer_goodbye()
+{
+    notify "Times up!!"
+}
+
+notify()
+{
+    if [ -e /usr/bin/notify-send ]; then
+        /usr/bin/notify-send "$PROGRAM_NAME" "$1"
+    fi
+}
+
+# Tools
+
+domainfile_test_n_sort()
+{
+    sort -u $1 > .tmpfile
+    cat /dev/null > .tmpfile1
+
+    while read p; do
+        [[ -z "$p" ]] && continue
+        [[ "$p" =~ ^#.*$ ]] && continue
+
+        HOST=$(host "$p" &> /dev/null)
+        if ! [ $? == 2 ]; then
+            echo "$p" >> .tmpfile1
+        fi
+    done < .tmpfile
+
+    rm .tmpfile
+    cat .tmpfile1
+    rm .tmpfile1
+}
+
+domain_fetch_ips()
+{
+    cat /dev/null > .tmpipfile
+
+    while read p; do
+        [[ -z "$p" ]] && continue
+        [[ "$p" =~ ^#.*$ ]] && continue
+
+        host "$p" | grep -o -E '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' >> .tmpipfile
+    done < $1
+
+    sort -u .tmpipfile > .tmpipfile1
+    cat /dev/null > .tmpipfile
+    cat .tmpipfile1 > .tmpipfile
+    rm .tmpipfile1
+
+    cat .tmpipfile
+    rm .tmpipfile
+}
+
+status_notify()
+{
+    thepid=$(cat /tmp/prostudyPID 2> /dev/null)
+    if [ $? == 1 ]; then
+        thepid=$(cat /tmp/prostudyPTPID 2> /dev/null)
+        if [ $? == 1 ]; then
+            notify "Not running"
+            exit 0
+        else
+            notify "$(ps -u root --sort=start_time -eo pid,cmd,etime | grep $thepid | awk 'match($0,/[0-9][0-9][\:][0-9][0-9]/){print substr($0,RSTART,RLENGTH)}' | head -n 1) of $(cat /tmp/prostutimePT) min"
+        fi
+    else
+        notify "$(ps -u root --sort=start_time -eo pid,cmd,etime | grep $thepid | awk 'match($0,/[0-9][0-9][\:][0-9][0-9]/){print substr($0,RSTART,RLENGTH)}' | head -n 1) of $(cat /tmp/prostutime) min"
+    fi
+}
+
+# Start the show
+main "$@"

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+curl -sL "https://keybase.io/windelborg/pgp_keys.asc" | sudo apt-key add -
+
+echo "deb http://deb.windelborg.dk /" | sudo tee /etc/apt/sources.list.d/windelborg.list
+
+apt-get update
+
+apt-get install prostudy

@@ -1,0 +1,16 @@
+mate-terminal
+gnome-terminal
+konsole
+sensible-terminal
+vim
+htop
+nano
+mate-control-center
+mate-tweak
+sublime_text
+caja
+pluma
+dconf-editor
+calibre
+vimrc
+zshrc

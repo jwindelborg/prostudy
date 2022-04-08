@@ -1,0 +1,41 @@
+#/usr/bin/env bash
+
+_prostudy_completions()
+{
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    opts="-h --help -t --status-notify -s --test-domains --fetch-domain-ips --debug --delete-pid-lock"
+
+    case "${prev}" in
+        --help|--status-notify|--fetch-domain-ips|[[:digit:]]|-!(-*)[hgt])
+            return 0
+            ;;
+        --test-domains)
+            COMPREPLY=( $(compgen -f ${cur}) )
+            return 0
+            ;;
+        --fetch-domain-ips)
+            COMPREPLY=( $(compgen -f ${cur}) )
+            return 0
+            ;;
+        *)
+        ;;
+    esac
+
+    if [[ "$cur" == --* ]]; then
+        COMPREPLY=( $(compgen -W '--help --status-notify --test-domains --fetch-domain-ips --debug --delete-pid-lock' -- ${cur}) )
+    elif [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W '-h -t -s' -- ${cur}) )
+    else
+        timesuggest=$(cat /tmp/prostutime 2> /dev/null)
+        if ! [ $? == 1 ]; then
+            COMPREPLY=( $(compgen -W "$timesuggest" -- ${cur}) )
+        else
+            COMPREPLY=( $(compgen -W '25 30 45 60 120' -- ${cur}) )
+        fi
+    fi
+}
+
+complete -F _prostudy_completions prostudy
